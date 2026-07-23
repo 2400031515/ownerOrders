@@ -91,13 +91,31 @@
         <main id="orders" class="space-y-6"></main>
     </div>
 
-    <!-- ==================== JAVASCRIPT CORE ==================== -->
+    <!-- Firebase SDK Compat -->
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
+
+    <!-- JAVASCRIPT CORE -->
     <script>
+        // REPLACE WITH YOUR FIREBASE CONFIG
+        const firebaseConfig = {
+            apiKey: "YOUR_API_KEY",
+            authDomain: "YOUR_PROJECT.firebaseapp.com",
+            projectId: "YOUR_PROJECT_ID",
+            storageBucket: "YOUR_PROJECT.appspot.com",
+            messagingSenderId: "YOUR_SENDER_ID",
+            appId: "YOUR_APP_ID"
+        };
+
+        firebase.initializeApp(firebaseConfig);
+        const db = firebase.firestore();
+
         const ADMIN_USER = "admin";
         const ADMIN_PASS = "adminpassword";
 
         let currentActiveUser = null;
         let knownOrderCount = 0;
+        let fetchedOrders = [];
 
         // 🔊 Audio Alert Utility
         function playAudioBeep() {
@@ -116,7 +134,7 @@
         }
 
         // Authentication Engine
-        function loginDashboard() {
+        async function loginDashboard() {
             const u = document.getElementById("dashUser").value.trim();
             const p = document.getElementById("dashPass").value.trim();
 
@@ -126,13 +144,15 @@
                 return;
             }
 
-            const staffAccounts = JSON.parse(localStorage.getItem("staffAccounts")) || [];
-            const matchedStaff = staffAccounts.find(s => s.username === u && s.password === p);
-
-            if (matchedStaff) {
-                currentActiveUser = { name: matchedStaff.name, role: "staff" };
-                loadDashboard();
-                return;
+            try {
+                const doc = await db.collection("staffAccounts").doc(u).get();
+                if (doc.exists && doc.data().password === p) {
+                    currentActiveUser = { name: doc.data().name, role: "staff" };
+                    loadDashboard();
+                    return;
+                }
+            } catch (err) {
+                console.error("Staff Auth Error:", err);
             }
 
             alert("Invalid Credentials!");
@@ -153,7 +173,7 @@
                 document.getElementById("btnClearAll").classList.add("hidden");
             }
 
-            displayOrders();
+            listenToOrdersRealtime();
         }
 
         function logoutDashboard() {
@@ -164,8 +184,8 @@
             document.getElementById("dashPass").value = "";
         }
 
-        // Staff Account Creator (Admin Only)
-        function createStaffAccount() {
+        // Staff Account Creator (Admin Only) - Cloud Synced
+        async function createStaffAccount() {
             const name = document.getElementById("staffName").value.trim();
             const user = document.getElementById("staffUser").value.trim();
             const pass = document.getElementById("staffPass").value.trim();
@@ -175,75 +195,101 @@
                 return;
             }
 
-            const staffAccounts = JSON.parse(localStorage.getItem("staffAccounts")) || [];
-            if (staffAccounts.some(s => s.username === user) || user === ADMIN_USER) {
-                alert("Username already exists!");
+            if (user === ADMIN_USER) {
+                alert("Username reserved!");
                 return;
             }
 
-            staffAccounts.push({ name: name, username: user, password: pass });
-            localStorage.setItem("staffAccounts", JSON.stringify(staffAccounts));
+            try {
+                const staffRef = db.collection("staffAccounts").doc(user);
+                const doc = await staffRef.get();
+                if (doc.exists) {
+                    alert("Username already exists!");
+                    return;
+                }
 
-            alert(`Staff account created for ${name}!`);
-            document.getElementById("staffName").value = "";
-            document.getElementById("staffUser").value = "";
-            document.getElementById("staffPass").value = "";
-            renderStaffList();
+                await staffRef.set({ name: name, username: user, password: pass });
+                alert(`Staff account created for ${name}!`);
+                document.getElementById("staffName").value = "";
+                document.getElementById("staffUser").value = "";
+                document.getElementById("staffPass").value = "";
+            } catch (err) {
+                console.error("Error creating staff:", err);
+            }
         }
 
         function renderStaffList() {
-            const staffAccounts = JSON.parse(localStorage.getItem("staffAccounts")) || [];
-            const listContainer = document.getElementById("staffList");
+            db.collection("staffAccounts").onSnapshot(snapshot => {
+                const listContainer = document.getElementById("staffList");
+                if (snapshot.empty) {
+                    listContainer.innerHTML = "<em class='text-slate-400'>No staff accounts created yet.</em>";
+                    return;
+                }
 
-            if (staffAccounts.length === 0) {
-                listContainer.innerHTML = "<em class='text-slate-400'>No staff accounts created yet.</em>";
-                return;
+                let html = "";
+                snapshot.forEach(doc => {
+                    const s = doc.data();
+                    html += `
+                        <span class="inline-flex items-center gap-1.5 px-3 py-1 bg-slate-100 border border-slate-200 rounded-lg text-xs font-medium">
+                            👤 <b>${s.name}</b> (${s.username}) 
+                            <button onclick="deleteStaff('${doc.id}')" class="text-red-500 hover:text-red-700 font-bold ml-1">✕</button>
+                        </span>
+                    `;
+                });
+                listContainer.innerHTML = html;
+            });
+        }
+
+        async function deleteStaff(id) {
+            try {
+                await db.collection("staffAccounts").doc(id).delete();
+            } catch (err) {
+                console.error("Error deleting staff:", err);
             }
-
-            listContainer.innerHTML = staffAccounts.map((s, idx) => `
-                <span class="inline-flex items-center gap-1.5 px-3 py-1 bg-slate-100 border border-slate-200 rounded-lg text-xs font-medium">
-                    👤 <b>${s.name}</b> (${s.username}) 
-                    <button onclick="deleteStaff(${idx})" class="text-red-500 hover:text-red-700 font-bold ml-1">✕</button>
-                </span>
-            `).join('');
         }
 
-        function deleteStaff(idx) {
-            const staffAccounts = JSON.parse(localStorage.getItem("staffAccounts")) || [];
-            staffAccounts.splice(idx, 1);
-            localStorage.setItem("staffAccounts", JSON.stringify(staffAccounts));
-            renderStaffList();
-        }
-
-        // Toggle Item Batch Completion State
-        function toggleOrderDone(orderNumber) {
-            const orders = JSON.parse(localStorage.getItem('confirmedOrders')) || [];
-            const idx = orders.findIndex(o => o.orderNumber == orderNumber);
-
-            if (idx !== -1) {
-                orders[idx].status = (orders[idx].status === "Done") ? "Pending" : "Done";
-                localStorage.setItem('confirmedOrders', JSON.stringify(orders));
+        // Real-time Cloud Firestore Orders Listener
+        function listenToOrdersRealtime() {
+            db.collection("orders").onSnapshot(snapshot => {
+                fetchedOrders = [];
+                snapshot.forEach(doc => {
+                    fetchedOrders.push({ docId: doc.id, ...doc.data() });
+                });
                 displayOrders();
+            });
+        }
+
+        // Toggle Item Batch Completion State in Cloud
+        async function toggleOrderDone(docId, currentStatus) {
+            const nextStatus = (currentStatus === "Done") ? "Pending" : "Done";
+            try {
+                await db.collection("orders").doc(docId).update({ status: nextStatus });
+            } catch(err) {
+                console.error("Error updating order status:", err);
             }
         }
 
         // STAFF ACTION: Sets status to "AlertSent". Clears items from Staff screen & ONLY THEN displays table bill to Admin.
-        function markTableCompleteAndNotifyAdmin(tableNum) {
-            const orders = JSON.parse(localStorage.getItem('confirmedOrders')) || [];
-            orders.forEach(o => {
-                if (o.tableNumber == tableNum) {
-                    o.status = "AlertSent";
-                }
-            });
-            localStorage.setItem('confirmedOrders', JSON.stringify(orders));
-            playAudioBeep();
-            alert(`Table ${tableNum} order sent to Admin for billing! Cleared from staff screen.`);
-            displayOrders();
+        async function markTableCompleteAndNotifyAdmin(tableNum) {
+            const tableOrders = fetchedOrders.filter(o => o.tableNumber == tableNum);
+            try {
+                const batch = db.batch();
+                tableOrders.forEach(o => {
+                    const ref = db.collection("orders").doc(o.docId);
+                    batch.update(ref, { status: "AlertSent" });
+                });
+                await batch.commit();
+
+                playAudioBeep();
+                alert(`Table ${tableNum} order sent to Admin for billing! Cleared from staff screen.`);
+            } catch(err) {
+                console.error("Error alerting admin:", err);
+            }
         }
 
         // Main Rendering Pipeline
         function displayOrders() {
-            const orders = JSON.parse(localStorage.getItem('confirmedOrders')) || [];
+            const orders = fetchedOrders;
             const ordersContainer = document.getElementById('orders');
             const notificationArea = document.getElementById('adminNotificationArea');
             
@@ -311,7 +357,7 @@
                     return `
                         <div class="flex items-center justify-between p-3 rounded-lg bg-slate-50 border-l-4 ${isDone ? 'border-emerald-500 completed-batch' : 'border-blue-500'}">
                             <div>
-                                <h5 class="text-xs font-bold text-blue-600">Order ID: #${batch.orderNumber} <span class="text-slate-400 font-normal">(${batch.timestamp || ''})</span></h5>
+                                <h5 class="text-xs font-bold text-blue-600">Order ID: #${batch.orderNumber} <span class="text-slate-400 font-normal">(${batch.timestamp ? (batch.timestamp.toDate ? batch.timestamp.toDate().toLocaleTimeString() : batch.timestamp) : ''})</span></h5>
                                 <ul class="text-sm font-medium text-slate-700 mt-1 list-disc list-inside">
                                     ${batch.items.map(item => `<li>${item}</li>`).join('')}
                                 </ul>
@@ -319,8 +365,8 @@
                             <div>
                                 ${isDone 
                                     ? `<span class="text-xs font-bold text-emerald-600">✓ COMPLETED</span>
-                                       <button onclick="toggleOrderDone('${batch.orderNumber}')" class="ml-2 text-xs bg-slate-200 hover:bg-slate-300 text-slate-700 px-2.5 py-1 rounded font-semibold">Undo</button>` 
-                                    : `<button onclick="toggleOrderDone('${batch.orderNumber}')" class="text-xs bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg font-bold transition">Mark Done</button>`
+                                       <button onclick="toggleOrderDone('${batch.docId}', '${batch.status}')" class="ml-2 text-xs bg-slate-200 hover:bg-slate-300 text-slate-700 px-2.5 py-1 rounded font-semibold">Undo</button>` 
+                                    : `<button onclick="toggleOrderDone('${batch.docId}', '${batch.status}')" class="text-xs bg-emerald-600 hover:bg-emerald-700 text-white px-3 py-1.5 rounded-lg font-bold transition">Mark Done</button>`
                                 }
                             </div>
                         </div>
@@ -399,10 +445,9 @@
             }
         }
 
-        // WhatsApp Bill Generator & Auto-Purge from Admin
-        function sendCombinedBillToWhatsApp(tableNum) {
-            const orders = JSON.parse(localStorage.getItem('confirmedOrders')) || [];
-            const tableOrders = orders.filter(o => o.tableNumber == tableNum);
+        // WhatsApp Bill Generator & Cloud Purge from Admin
+        async function sendCombinedBillToWhatsApp(tableNum) {
+            const tableOrders = fetchedOrders.filter(o => o.tableNumber == tableNum);
 
             if (tableOrders.length === 0) return;
 
@@ -447,38 +492,41 @@ Hope to see you again soon!`;
             // 1. Launch WhatsApp with bill
             window.open(`https://wa.me/${rawPhone}?text=${encodedBill}`, '_blank');
 
-            // 2. Automatically remove/clear that table's bill from Admin portal database
-            const remainingOrders = orders.filter(o => o.tableNumber != tableNum);
-            localStorage.setItem('confirmedOrders', JSON.stringify(remainingOrders));
-
-            // 3. Re-render portal view
-            displayOrders();
+            // 2. Remove/clear that table's bill from Cloud Firestore
+            await closeTable(tableNum, false);
         }
 
-        function closeTable(tableNum) {
-            if (confirm(`Close and clear orders for Table ${tableNum}?`)) {
-                const orders = JSON.parse(localStorage.getItem('confirmedOrders')) || [];
-                const remainingOrders = orders.filter(o => o.tableNumber != tableNum);
-                localStorage.setItem('confirmedOrders', JSON.stringify(remainingOrders));
-                displayOrders();
+        async function closeTable(tableNum, askConfirm = true) {
+            if (!askConfirm || confirm(`Close and clear orders for Table ${tableNum}?`)) {
+                const tableOrders = fetchedOrders.filter(o => o.tableNumber == tableNum);
+                try {
+                    const batch = db.batch();
+                    tableOrders.forEach(o => {
+                        const ref = db.collection("orders").doc(o.docId);
+                        batch.delete(ref);
+                    });
+                    await batch.commit();
+                } catch(err) {
+                    console.error("Error closing table:", err);
+                }
             }
         }
 
-        function clearAllOrders() {
+        async function clearAllOrders() {
             if (confirm("Are you sure you want to clear all tables and orders?")) {
-                localStorage.removeItem('confirmedOrders');
-                knownOrderCount = 0;
-                displayOrders();
+                try {
+                    const batch = db.batch();
+                    fetchedOrders.forEach(o => {
+                        const ref = db.collection("orders").doc(o.docId);
+                        batch.delete(ref);
+                    });
+                    await batch.commit();
+                    knownOrderCount = 0;
+                } catch(err) {
+                    console.error("Error clearing orders:", err);
+                }
             }
         }
-
-        // Event listeners & polling loop
-        window.addEventListener('storage', function(e) {
-            if (e.key === 'confirmedOrders' && currentActiveUser) {
-                displayOrders();
-            }
-        });
-        setInterval(() => { if (currentActiveUser) displayOrders(); }, 2000);
     </script>
 </body>
 </html>
